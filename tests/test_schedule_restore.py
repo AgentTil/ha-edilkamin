@@ -258,6 +258,18 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         assert self.writer.last_result["preserved_external_slots"] == [94]
         assert not self.writer.windows
 
+    async def test_actual_sdk_errors_retain_and_retry_recovery(self):
+        await self.once()
+        for error in baseline.sdk_errors():
+            self.api.get_info.side_effect = error
+            await self.expire()
+            assert self.writer.windows[0]["phase"] == "restore_pending"
+            assert self.api.execute_command.await_count == 1
+        self.api.get_info.side_effect = lambda: deepcopy(self.info)
+        await self.expire()
+        assert not self.writer.windows
+        assert self.api.execute_command.await_count == 2
+
     async def test_cloud_failure_retains_recovery_then_retries(self):
         await self.once()
         self.api.get_info.side_effect = OSError("offline")
