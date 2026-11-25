@@ -6,7 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
 from homeassistant.core import HomeAssistant
@@ -14,36 +14,57 @@ from homeassistant.exceptions import HomeAssistantError
 import pytest
 import voluptuous as vol
 
-from custom_components.edilkamin.schedule_edit import (
-    EDIT_SCHEMA,
-    ScheduleWriter,
+from custom_components.edilkamin.schedule_restore import (
+    TemporaryScheduleWriter as ScheduleWriter,
     window_deadline,
 )
+from custom_components.edilkamin.schedule_schema import EDIT_SCHEMA
 from tests import test_schedule_edit as baseline
 
 
+async def validated(writer, data):
+    return await writer.set_schedule(EDIT_SCHEMA(data))
+
+
 class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
-    asyncSetUp = baseline.TestSchedule.asyncSetUp
+    async def asyncSetUp(self):
+        await baseline.TestSchedule.asyncSetUp(self)
+        store = Mock(async_load=AsyncMock(return_value=None), async_save=AsyncMock())
+        with patch(
+            "custom_components.edilkamin.schedule_restore.Store", return_value=store
+        ):
+            self.writer = ScheduleWriter(
+                self.hass, self.api, self.coordinator, "test-entry"
+            )
+        self.writer._arm = Mock()
+
+    call = baseline.TestSchedule.call
+
+    def real_hass(self):
+        hass = HomeAssistant(self.temp.name)
+        self.addAsyncCleanup(hass.async_stop, force=True)
+        return hass
 
     async def once(self, **fields):
+        await self.writer.async_start()
         request = {**self.request, "auto_restore": True, "date": "2026-11-17", **fields}
         now = datetime(2026, 11, 17, 20, tzinfo=ZoneInfo("Europe/Berlin"))
         with (
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.now",
+                "custom_components.edilkamin.schedule_restore.dt_util.now",
                 return_value=now,
             ),
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+                "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
                 return_value=now.astimezone(ZoneInfo("UTC")),
             ),
         ):
-            return await self.writer.set_schedule(request)
+            return await self.call(request)
 
     async def expire(self, writer=None):
         now = datetime(2026, 11, 17, 23, tzinfo=ZoneInfo("UTC"))
         with patch(
-            "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+            "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
             return_value=now,
         ):
             await (writer or self.writer).restore_due()
@@ -74,7 +95,7 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
     async def test_restore_never_runs_before_deadline(self):
         await self.once()
         with patch(
-            "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+            "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
             return_value=datetime(2026, 11, 17, 22, 59, tzinfo=ZoneInfo("UTC")),
         ):
             await self.writer.restore_due()
@@ -150,33 +171,35 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         assert self.api.execute_command.await_count == 2
 
     async def test_two_entries_keep_independent_durable_recovery(self):
-        hass = HomeAssistant(self.temp.name)
+        hass = self.real_hass()
         writers = [
             ScheduleWriter(hass, self.api, self.coordinator, entry)
             for entry in ("first", "second")
         ]
         for writer in writers:
             writer._arm = Mock()
+        await writer.async_start()
         now = datetime(2026, 11, 17, 20, tzinfo=ZoneInfo("Europe/Berlin"))
         with (
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.now",
+                "custom_components.edilkamin.schedule_restore.dt_util.now",
                 return_value=now,
             ),
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+                "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
                 return_value=now.astimezone(ZoneInfo("UTC")),
             ),
         ):
             for writer, start in zip(writers, ("22:00", "23:30"), strict=True):
-                await writer.set_schedule(
+                await validated(
+                    writer,
                     {
                         **self.request,
                         "start": start,
                         "end": "22:30" if start == "22:00" else "24:00",
                         "auto_restore": True,
                         "date": "2026-11-17",
-                    }
+                    },
                 )
         assert writers[0].windows[0]["original"] == {"92": 0}
         assert writers[1].windows[0]["original"] == {"95": 0}
@@ -184,7 +207,7 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
             await writer.async_stop()
         for entry, slot in (("first", "92"), ("second", "95")):
             restarted = ScheduleWriter(
-                HomeAssistant(self.temp.name), self.api, self.coordinator, entry
+                self.real_hass(), self.api, self.coordinator, entry
             )
             restarted._arm = Mock()
             await restarted.async_start()
@@ -202,10 +225,10 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
 
     async def test_overlap_refuses_temporary_and_permanent_edits(self):
         await self.once()
-        with pytest.raises(HomeAssistantError, match="already"):
+        with pytest.raises(HomeAssistantError, match="temporary window"):
             await self.once(mode="economy")
-        with pytest.raises(HomeAssistantError, match="already"):
-            await self.writer.set_schedule({**self.request, "mode": "off"})
+        with pytest.raises(HomeAssistantError, match="temporary window"):
+            await self.call({**self.request, "mode": "off"})
         assert self.api.execute_command.await_count == 1
 
     async def test_nonoverlapping_windows_restore_independently(self):
@@ -213,7 +236,7 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         second = await self.once()
         assert first["window_id"] != second["window_id"]
         with patch(
-            "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+            "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
             return_value=datetime(2026, 11, 17, 21, 30, tzinfo=ZoneInfo("UTC")),
         ):
             await self.writer.restore_due()
@@ -284,27 +307,75 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         assert not self.writer.windows
         self.api.execute_command.assert_not_called()
 
+    async def test_expiry_while_saving_recovery_never_sends_command(self):
+        await self.writer.async_start()
+        now = datetime(2026, 11, 17, 20, tzinfo=ZoneInfo("Europe/Berlin"))
+        with (
+            patch(
+                "custom_components.edilkamin.schedule_restore.dt_util.now",
+                return_value=now,
+            ),
+            patch(
+                "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
+                return_value=now.astimezone(ZoneInfo("UTC")),
+            ) as clock,
+        ):
+
+            async def slow_storage(_data):
+                clock.return_value = datetime(2026, 11, 17, 23, tzinfo=ZoneInfo("UTC"))
+
+            self.writer._store.async_save.side_effect = slow_storage
+            with pytest.raises(HomeAssistantError) as error:
+                await self.call(
+                    {**self.request, "auto_restore": True, "date": "2026-11-17"}
+                )
+            assert error.value.translation_key == "window_expired"
+        self.api.execute_command.assert_not_called()
+        assert self.writer.windows
+        self.writer._store.async_save.side_effect = None
+        await self.expire()
+        assert not self.writer.windows
+        self.api.execute_command.assert_not_called()
+
+    async def test_pending_backup_is_protected_from_other_edits(self):
+        await self.once()
+        original = Path(self.writer.windows[0]["backup"]) / "before.json"
+        with patch("custom_components.edilkamin.schedule_backup.BACKUP_LIMIT", 1):
+            await self.call({**self.request, "start": "20:00", "end": "20:30"})
+            await self.call({**self.request, "start": "20:30", "end": "21:00"})
+        assert original.exists()
+        await self.expire()
+        assert not self.writer.windows
+
+    async def test_stopped_writer_does_not_restore_until_loaded_again(self):
+        await self.once()
+        await self.writer.async_stop()
+        await self.expire()
+        assert self.api.execute_command.await_count == 1
+        assert self.writer.windows
+
     async def test_durable_recovery_survives_real_ha_storage_restart(self):
         writer = ScheduleWriter(
-            HomeAssistant(self.temp.name),
+            self.real_hass(),
             self.api,
             self.coordinator,
             "test-entry",
         )
         writer._arm = Mock()
+        await writer.async_start()
         now = datetime(2026, 11, 17, 20, tzinfo=ZoneInfo("Europe/Berlin"))
         with (
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.now",
+                "custom_components.edilkamin.schedule_restore.dt_util.now",
                 return_value=now,
             ),
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+                "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
                 return_value=now.astimezone(ZoneInfo("UTC")),
             ),
         ):
-            await writer.set_schedule(
-                {**self.request, "auto_restore": True, "date": "2026-11-17"}
+            await validated(
+                writer, {**self.request, "auto_restore": True, "date": "2026-11-17"}
             )
         files = list(Path(self.temp.name).glob(".storage/edilkamin_schedule_windows_*"))
         assert len(files) == 1
@@ -313,7 +384,7 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         }
         await writer.async_stop()
         restarted = ScheduleWriter(
-            HomeAssistant(self.temp.name),
+            self.real_hass(),
             self.api,
             self.coordinator,
             "test-entry",
@@ -330,11 +401,11 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
         await self.once()
         with (
             patch(
-                "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+                "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
                 return_value=datetime(2026, 11, 17, 22, tzinfo=ZoneInfo("UTC")),
             ),
             patch(
-                "custom_components.edilkamin.schedule_edit.async_call_later"
+                "custom_components.edilkamin.schedule_restore.async_call_later"
             ) as later,
         ):
             ScheduleWriter._arm(self.writer)
@@ -345,10 +416,10 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_ha_timer_executes_restoration_on_event_loop(self):
         await self.once()
-        self.writer.hass = HomeAssistant(self.temp.name)
+        self.writer.hass = self.real_hass()
         self.writer._arm = ScheduleWriter._arm.__get__(self.writer)
         with patch(
-            "custom_components.edilkamin.schedule_edit.dt_util.utcnow",
+            "custom_components.edilkamin.schedule_restore.dt_util.utcnow",
             return_value=datetime(2026, 11, 17, 23, tzinfo=ZoneInfo("UTC")),
         ):
             self.writer._arm(immediate=True)
@@ -379,7 +450,7 @@ class TestAutomaticReturn(unittest.IsolatedAsyncioTestCase):
             with self.subTest(fields=fields), pytest.raises(vol.Invalid):
                 await self.once(**fields)
         with pytest.raises(vol.Invalid):
-            await self.writer.set_schedule({**self.request, "date": "2026-11-17"})
+            await self.call({**self.request, "date": "2026-11-17"})
         for day in ["2026-11-10", "2026-12-01", "2026-11-24"]:
             with self.subTest(day=day), pytest.raises(HomeAssistantError):
                 await self.once(date=day)

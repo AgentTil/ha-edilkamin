@@ -18,5 +18,98 @@
         }
       }
     }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Wochenzeitplan ändern",
+      "description": "Aus-, Economy- oder Komfortzeiten für genau einen Ofen im Automatikmodus ändern. Chrono-Aktivierung und Zieltemperaturen bleiben erhalten. Lesen, Schreiben und Prüfen können etwa 105 Sekunden dauern, zusätzlich bis zu 20 Sekunden für die Aktualisierung sowie Wartezeit auf andere Änderungen oder Sicherungen. Vorschau schreibt nichts. Pro Ofen bleiben die letzten 20 Sicherungen und zusätzlich für ausstehende Rücknahmen benötigte Sicherungen erhalten.",
+      "fields": {
+        "days": {
+          "name": "Wochentage",
+          "description": "Ausgewählte Wochentage im gespeicherten Wochenplan."
+        },
+        "start": {
+          "name": "Beginn",
+          "description": "Lokale volle oder halbe Stunde, Sekunden null. Bereiche über Mitternacht aufteilen."
+        },
+        "end": {
+          "name": "Ende (ausschließlich)",
+          "description": "Lokale volle oder halbe Stunde, Sekunden null. 00:00 bedeutet Ende des ausgewählten Tages. Bisheriges 24:00 wird in YAML weiterhin akzeptiert."
+        },
+        "mode": {
+          "name": "Modus"
+        },
+        "preview_only": {
+          "name": "Nur Vorschau",
+          "description": "Gespeicherten Plan lesen und Änderungen anzeigen, ohne zu schreiben oder Sicherungen anzulegen."
+        },
+        "auto_restore": {
+          "name": "Automatisch zurücknehmen",
+          "description": "Einmalige Ausführung für genau einen Wochentag. HA und Cloud müssen zur Rücknahme erreichbar sein; Fehler bleiben ausstehend."
+        },
+        "date": {
+          "name": "Datum",
+          "description": "Optionales YYYY-MM-DD passend zum Wochentag. Ohne Datum gilt die nächste noch nicht beendete Ausführung. Nur mit automatischer Rücknahme."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_target": {
+      "message": "Genau einen geladenen Edilkamin-Ofen oder eine seiner Entitäten auswählen."
+    },
+    "manual_mode": {
+      "message": "Zeitplanänderungen werden derzeit nur im Automatikmodus unterstützt."
+    },
+    "representations_differ": {
+      "message": "Die Chrono-Darstellungen unterscheiden sich. Den Plan in The Mind prüfen."
+    },
+    "schedule_changed": {
+      "message": "Der Zeitplan wurde während der Vorbereitung geändert. Kein Befehl gesendet."
+    },
+    "invalid_cloud_schedule": {
+      "message": "Die Cloud lieferte keinen vollständigen gültigen Wochenplan."
+    },
+    "readback_mismatch": {
+      "message": "Der zurückgelesene Plan entspricht nicht vollständig der erwarteten Änderung."
+    },
+    "write_unconfirmed": {
+      "message": "Zeitplanänderung nicht bestätigt; der Befehl wurde nicht wiederholt. The Mind prüfen."
+    },
+    "schedule_failed": {
+      "message": "Zeitplanänderung fehlgeschlagen. Cloud-Verbindung und Sicherungsspeicher prüfen."
+    },
+    "invalid_recovery": {
+      "message": "Gespeicherte Rücknahmedaten sind ungültig. Kein Befehl gesendet."
+    },
+    "invalid_window_date": {
+      "message": "Eine passende, noch nicht beendete Ausführung innerhalb von sieben Tagen wählen. Zeitumstellung beachten."
+    },
+    "window_overlap": {
+      "message": "Dieser Bereich gehört zu einem einmaligen Fenster. Rücknahme abwarten."
+    },
+    "window_expired": {
+      "message": "Das einmalige Fenster ist bereits beendet. Kein Befehl gesendet."
+    }
+  },
+  "selector": {
+    "weekdays": {
+      "options": {
+        "monday": "Montag",
+        "tuesday": "Dienstag",
+        "wednesday": "Mittwoch",
+        "thursday": "Donnerstag",
+        "friday": "Freitag",
+        "saturday": "Samstag",
+        "sunday": "Sonntag"
+      }
+    },
+    "chrono_modes": {
+      "options": {
+        "off": "Aus",
+        "economy": "Economy",
+        "comfort": "Komfort"
+      }
+    }
   }
 }

@@ -18,5 +18,98 @@
         }
       }
     }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Set weekly schedule range",
+      "description": "Edit off/economy/comfort slots on exactly one automatic-mode stove. Chrono enablement and targets are preserved. Cloud reads, command and verification can take about 105 seconds, plus up to 20 seconds for refresh and time waiting for queued edits or backup storage. Preview never writes. Keep the last 20 recent backups per stove, plus backups protected by pending recovery.",
+      "fields": {
+        "days": {
+          "name": "Weekdays",
+          "description": "Selected weekdays in the saved weekly program."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Local whole or half hour, with zero seconds. Split overnight ranges at midnight."
+        },
+        "end": {
+          "name": "End (exclusive)",
+          "description": "Local whole or half hour, with zero seconds. 00:00 means the end of the selected day; legacy 24:00 is also accepted in YAML."
+        },
+        "mode": {
+          "name": "Mode"
+        },
+        "preview_only": {
+          "name": "Preview only",
+          "description": "Read the saved schedule and return changes without writing or creating backups."
+        },
+        "auto_restore": {
+          "name": "Automatically restore",
+          "description": "One occurrence on one weekday. HA and cloud access are required at expiry; failures remain pending."
+        },
+        "date": {
+          "name": "Occurrence date",
+          "description": "Optional matching YYYY-MM-DD. Otherwise use the next occurrence that has not ended. Only with auto_restore."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_target": {
+      "message": "Select exactly one loaded Edilkamin device or entity."
+    },
+    "manual_mode": {
+      "message": "Schedule editing is currently supported only in automatic mode."
+    },
+    "representations_differ": {
+      "message": "Chrono representations differ; check the plan in The Mind."
+    },
+    "schedule_changed": {
+      "message": "The schedule changed while preparing this edit; no command sent."
+    },
+    "invalid_cloud_schedule": {
+      "message": "The cloud did not return a complete valid weekly schedule."
+    },
+    "readback_mismatch": {
+      "message": "Cloud readback does not match the complete expected schedule."
+    },
+    "write_unconfirmed": {
+      "message": "Schedule write not confirmed; it was not retried. Check The Mind."
+    },
+    "schedule_failed": {
+      "message": "Schedule editing failed; check cloud connectivity and backup storage."
+    },
+    "invalid_recovery": {
+      "message": "Saved temporary-window recovery data is invalid; no command sent."
+    },
+    "invalid_window_date": {
+      "message": "Choose a matching occurrence within seven days that has not ended. Check DST boundaries."
+    },
+    "window_overlap": {
+      "message": "This range belongs to a temporary window; await its restoration."
+    },
+    "window_expired": {
+      "message": "The temporary window has ended; no command sent."
+    }
+  },
+  "selector": {
+    "weekdays": {
+      "options": {
+        "monday": "Monday",
+        "tuesday": "Tuesday",
+        "wednesday": "Wednesday",
+        "thursday": "Thursday",
+        "friday": "Friday",
+        "saturday": "Saturday",
+        "sunday": "Sunday"
+      }
+    },
+    "chrono_modes": {
+      "options": {
+        "off": "Off",
+        "economy": "Economy",
+        "comfort": "Comfort"
+      }
+    }
   }
 }

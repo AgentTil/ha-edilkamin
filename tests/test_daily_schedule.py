@@ -47,18 +47,20 @@ def test_metadata(coordinator):
     assert sensor.device_info["identifiers"] == {("edilkamin", "00:11:22:33:44:55")}
 
 
-def test_recovery_status_is_exposed_without_sharing_mutable_data(coordinator):
+def test_last_edit_is_exposed_without_sharing_mutable_data(coordinator):
     coordinator.schedule_edit_status = {
-        "temporary_windows": [{"id": "window", "phase": "restore_pending"}],
-        "last_schedule_edit": {"status": "restore_pending"},
+        "last_schedule_edit": {
+            "status": "verified_with_warning",
+            "warning": "representations_differ",
+        }
     }
     sensor = EdilkaminDailyScheduleSensor(coordinator)
     attributes = sensor.extra_state_attributes
-    assert attributes["last_schedule_edit"]["status"] == "restore_pending"
-    attributes["temporary_windows"][0]["phase"] = "changed"
+    assert attributes["last_schedule_edit"]["warning"] == "representations_differ"
+    attributes["last_schedule_edit"]["status"] = "changed"
     assert (
-        coordinator.schedule_edit_status["temporary_windows"][0]["phase"]
-        == "restore_pending"
+        coordinator.schedule_edit_status["last_schedule_edit"]["status"]
+        == "verified_with_warning"
     )
 
 

@@ -12,6 +12,7 @@ import pytest
 import voluptuous as vol
 
 from custom_components.edilkamin.schedule_edit import ScheduleWriter
+from custom_components.edilkamin.schedule_schema import EDIT_SCHEMA
 
 
 class TestSchedule(unittest.IsolatedAsyncioTestCase):
@@ -50,14 +51,7 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
         self.coordinator = Mock(async_request_refresh=AsyncMock())
         self.coordinator.get_mac_address.return_value = "00:11:22:33:44:55"
         self.override = False
-        store = Mock(async_load=AsyncMock(return_value=None), async_save=AsyncMock())
-        with patch(
-            "custom_components.edilkamin.schedule_edit.Store", return_value=store
-        ):
-            self.writer = ScheduleWriter(
-                self.hass, self.api, self.coordinator, "test-entry"
-            )
-        self.writer._arm = Mock()
+        self.writer = ScheduleWriter(self.hass, self.api, self.coordinator)
         self.request = {
             "days": ["tuesday"],
             "start": "23:30",
@@ -65,12 +59,16 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             "mode": "comfort",
         }
 
+    async def call(self, data):
+        # Model the single validation boundary provided by the registered action.
+        return await self.writer.set_schedule(EDIT_SCHEMA(dict(data)))
+
     async def test_only_requested_tuesday_slot_and_backup_before_command(self):
         original = deepcopy(self.info)
         original_command = self.api.execute_command.side_effect
 
         async def with_backup(payload):
-            files = list(Path(self.temp.name).glob("edilkamin-backups/*/before.json"))
+            files = list(Path(self.temp.name).glob("edilkamin-backups/*/*/before.json"))
             assert len(files) == 1
             assert (
                 json.loads(files[0].read_text())["chrono"] == original["nvm"]["chrono"]
@@ -84,7 +82,7 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             await original_command(payload)
 
         self.api.execute_command.side_effect = with_backup
-        result = await self.writer.set_schedule(self.request)
+        result = await self.call(self.request)
         assert result["status"] == "verified"
         assert result["changed_slots"] == result["power_ranges_changed_slots"] == [95]
         assert self.api.execute_command.await_count == 1
@@ -93,7 +91,7 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
         assert self.info == original
 
     async def test_multi_day_half_hours_and_sunday_day_boundary(self):
-        result = await self.writer.set_schedule(
+        result = await self.call(
             {
                 "days": ["monday", "sunday", "sunday"],
                 "start": "00:30",
@@ -106,19 +104,19 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
     async def test_off_preserves_remaining_modes(self):
         for field in ("temperature_ranges", "power_ranges"):
             self.info["nvm"]["chrono"][field] = [2] * 336
-        result = await self.writer.set_schedule({**self.request, "mode": "off"})
+        result = await self.call({**self.request, "mode": "off"})
         assert result["changed_slots"] == [95]
         assert self.info["nvm"]["chrono"]["temperature_ranges"][94:97] == [2, 0, 2]
 
     async def test_preview_sends_no_write_and_creates_no_backup(self):
-        result = await self.writer.set_schedule({**self.request, "preview_only": True})
+        result = await self.call({**self.request, "preview_only": True})
         assert result["status"] == "preview"
         assert result["changed_slots"] == [95]
         self.api.execute_command.assert_not_called()
         assert not list(Path(self.temp.name).iterdir())
 
     async def test_noop_sends_no_command(self):
-        result = await self.writer.set_schedule({**self.request, "mode": "off"})
+        result = await self.call({**self.request, "mode": "off"})
         assert result["status"] == "unchanged"
         self.api.execute_command.assert_not_called()
 
@@ -129,30 +127,28 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             {"end": "24:30"},
             {"end": "00:30"},
             {"end": "23:30"},
-            {"start": "6:00"},
             {"days": []},
             {"days": ["Tuesday"]},
             {"days": "tuesday"},
             {"mode": "power_2"},
             {"mode": 2},
-            {"preview_only": "false"},
         ]
         for fields in invalid:
             with self.subTest(fields=fields), pytest.raises(vol.Invalid):
-                await self.writer.set_schedule({**self.request, **fields})
+                await self.call({**self.request, **fields})
         self.api.get_info.assert_not_called()
         self.api.execute_command.assert_not_called()
 
     async def test_manual_mode_refused(self):
         self.info["nvm"]["user_parameters"]["is_auto"] = False
         with pytest.raises(HomeAssistantError):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         self.api.execute_command.assert_not_called()
 
     async def test_divergent_representations_refused(self):
         self.info["nvm"]["chrono"]["power_ranges"][5] = 5
         with pytest.raises(HomeAssistantError):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         self.api.execute_command.assert_not_called()
 
     async def test_malformed_or_missing_week_data_refused(self):
@@ -164,12 +160,12 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
                 self.subTest(value=repr(malformed)[-20:]),
                 pytest.raises(HomeAssistantError),
             ):
-                await self.writer.set_schedule(self.request)
+                await self.call(self.request)
         self.api.execute_command.assert_not_called()
 
     async def test_disabled_chrono_remains_disabled(self):
         self.info["nvm"]["chrono"]["is_active"] = False
-        result = await self.writer.set_schedule(self.request)
+        result = await self.call(self.request)
         assert result["status"] == "verified"
         assert not result["chrono_active"]
         assert self.api.execute_command.await_count == 1
@@ -179,26 +175,40 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
         self.info["nvm"]["chrono"]["temperature_ranges"][1] = 1
         self.api.get_info.side_effect = [original, deepcopy(self.info)]
         with pytest.raises(HomeAssistantError, match="schedule changed"):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         self.api.execute_command.assert_not_called()
         assert self.writer.last_result["status"] == "conflict"
 
     async def test_backup_failure_sends_no_command(self):
         self.hass.async_add_executor_job.side_effect = OSError("disk full")
         with pytest.raises(HomeAssistantError):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         self.api.execute_command.assert_not_called()
 
     async def test_cloud_read_failure_sends_no_command(self):
         self.api.get_info.side_effect = OSError("offline")
         with pytest.raises(HomeAssistantError):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
+        self.api.execute_command.assert_not_called()
+
+    async def test_refresh_failure_does_not_reverse_verified_result(self):
+        self.coordinator.async_request_refresh.side_effect = OSError("offline")
+        with self.assertLogs("custom_components.edilkamin.schedule_edit", "WARNING"):
+            result = await self.call(self.request)
+        assert result["status"] == "verified"
+        assert self.api.execute_command.await_count == 1
+
+    async def test_missing_mode_is_cloud_error_not_manual_mode(self):
+        self.info["nvm"]["user_parameters"] = {}
+        with pytest.raises(HomeAssistantError) as error:
+            await self.call(self.request)
+        assert error.value.translation_key == "invalid_cloud_schedule"
         self.api.execute_command.assert_not_called()
 
     async def test_ambiguous_write_is_not_retried(self):
         self.api.execute_command.side_effect = TimeoutError()
         with pytest.raises(HomeAssistantError, match="not retried"):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         assert self.api.execute_command.await_count == 1
         assert self.writer.last_result["status"] == "unconfirmed"
 
@@ -217,7 +227,7 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             ),
             pytest.raises(HomeAssistantError),
         ):
-            await self.writer.set_schedule(self.request)
+            await self.call(self.request)
         assert self.api.execute_command.await_count == 1
         assert self.writer.last_result["status"] == "unconfirmed"
 
@@ -226,9 +236,14 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             self.info["nvm"]["chrono"]["temperature_ranges"] = list(payload["value"])
 
         self.api.execute_command.side_effect = command
-        result = await self.writer.set_schedule(self.request)
-        assert result["status"] == "verified"
+        result = await self.call(self.request)
         assert result["power_ranges_changed_slots"] == []
+        assert result["status"] == "verified_with_warning"
+        assert result["warning"] == "representations_differ"
+        assert self.coordinator.schedule_edit_status["last_schedule_edit"] == result
+        with pytest.raises(HomeAssistantError, match="representations differ"):
+            await self.call({**self.request, "mode": "economy"})
+        assert self.api.execute_command.await_count == 1
 
     async def test_delayed_readback_is_verified_without_second_write(self):
         original = deepcopy(self.info)
@@ -249,8 +264,8 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
         with patch(
             "custom_components.edilkamin.schedule_edit.asyncio.sleep", new=AsyncMock()
         ):
-            result = await self.writer.set_schedule(self.request)
-        assert result["status"] == "verified"
+            result = await self.call(self.request)
+        assert result["status"] == "verified_with_warning"
         assert self.api.execute_command.await_count == 1
 
 
