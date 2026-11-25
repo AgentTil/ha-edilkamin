@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from functools import partial
+from json import JSONDecodeError
 import logging
 from typing import TYPE_CHECKING
 
 from aiohttp import ClientError
+from botocore.exceptions import BotoCoreError, ClientError as CognitoClientError
 from homeassistant.exceptions import HomeAssistantError
+from httpx import HTTPError
 
 from .schedule_backup import create_backup, save_result
 from .schedule_errors import fail, operation_error
@@ -22,7 +25,16 @@ if TYPE_CHECKING:
     from .coordinator import EdilkaminCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-EXPECTED_ERRORS = (TimeoutError, ClientError, OSError, HomeAssistantError)
+EXPECTED_ERRORS = (
+    TimeoutError,
+    ClientError,
+    HTTPError,
+    BotoCoreError,
+    CognitoClientError,
+    JSONDecodeError,
+    OSError,
+    HomeAssistantError,
+)
 
 
 def snapshot(info: dict) -> dict:
@@ -244,7 +256,7 @@ class ScheduleWriter:
                 await self._refresh()
             except HomeAssistantError:
                 raise
-            except (TimeoutError, ClientError, OSError) as error:
+            except EXPECTED_ERRORS as error:
                 _LOGGER.warning("Schedule editing failed: %s", type(error).__name__)
                 msg = "schedule_failed"
                 raise operation_error(msg) from error

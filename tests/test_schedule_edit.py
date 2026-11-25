@@ -2,17 +2,42 @@
 
 from copy import deepcopy
 import json
+from json import JSONDecodeError
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from botocore.exceptions import (
+    ClientError as CognitoClientError,
+    EndpointConnectionError,
+)
 from homeassistant.exceptions import HomeAssistantError
+import httpx
 import pytest
 import voluptuous as vol
 
 from custom_components.edilkamin.schedule_edit import ScheduleWriter
 from custom_components.edilkamin.schedule_schema import EDIT_SCHEMA
+
+
+def sdk_errors():
+    """The actual SDK uses HTTPX and Cognito/botocore, not only aiohttp."""
+    request = httpx.Request("GET", "https://cloud.invalid/device/info")
+    return [
+        httpx.ConnectError("offline", request=request),
+        httpx.HTTPStatusError(
+            "unavailable",
+            request=request,
+            response=httpx.Response(503, request=request),
+        ),
+        CognitoClientError(
+            {"Error": {"Code": "NotAuthorizedException", "Message": "invalid"}},
+            "InitiateAuth",
+        ),
+        EndpointConnectionError(endpoint_url="https://auth.invalid"),
+        JSONDecodeError("invalid response", "", 0),
+    ]
 
 
 class TestSchedule(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +229,30 @@ class TestSchedule(unittest.IsolatedAsyncioTestCase):
             await self.call(self.request)
         assert error.value.translation_key == "invalid_cloud_schedule"
         self.api.execute_command.assert_not_called()
+
+    async def test_actual_sdk_read_errors_are_translated_and_logged(self):
+        for error in sdk_errors():
+            self.api.get_info.side_effect = error
+            with (
+                self.subTest(error=type(error).__name__),
+                self.assertLogs("custom_components.edilkamin.schedule_edit", "WARNING"),
+                pytest.raises(HomeAssistantError) as raised,
+            ):
+                await self.call(self.request)
+            assert raised.value.translation_key == "schedule_failed"
+        self.api.execute_command.assert_not_called()
+
+    async def test_actual_sdk_command_errors_are_not_retried(self):
+        for attempt, error in enumerate(sdk_errors(), start=1):
+            self.api.execute_command.side_effect = error
+            with (
+                self.subTest(error=type(error).__name__),
+                self.assertLogs("custom_components.edilkamin.schedule_edit", "WARNING"),
+                pytest.raises(HomeAssistantError) as raised,
+            ):
+                await self.call(self.request)
+            assert raised.value.translation_key == "write_unconfirmed"
+            assert self.api.execute_command.await_count == attempt
 
     async def test_ambiguous_write_is_not_retried(self):
         self.api.execute_command.side_effect = TimeoutError()
