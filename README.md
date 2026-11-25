@@ -181,8 +181,8 @@ Requires Home Assistant 2026.3.0 or later.
 ### Editing a weekly chrono schedule
 
 The `edilkamin.set_schedule` action permanently replaces a time range on one or
-more weekdays. Select exactly one Edilkamin device with a loaded integration
-entry. Editing currently requires automatic mode and matching
+more weekdays. Select exactly one Edilkamin stove using a device or entity target. The action
+remains registered during entry reloads; unloaded targets raise a translated error. Editing currently requires automatic mode and matching
 `temperature_ranges` / `power_ranges` representations in the cloud response.
 These fields are not assumed to be independent programs: a write may update
 both representations of the same schedule. Manual power scheduling is not
@@ -201,7 +201,8 @@ data:
 ```
 
 Use `off`, `economy`, or `comfort`. Times are local half-hour labels; the end
-is exclusive, and `24:00` is accepted only as an end. Split overnight ranges
+is exclusive. The HA time selector uses `00:00` to mean the end of the selected
+day; legacy YAML `24:00` remains supported as an end only. Seconds must be zero. Split overnight ranges
 into two actions. To rebuild a complete day, first set `00:00`–`24:00` to `off`,
 then add its economy/comfort ranges. Other days and unselected slots are kept.
 The saved weekly plan is edited even if chrono is disabled; the action does
@@ -211,11 +212,13 @@ command. Changes recur weekly and remain in effect until edited again.
 With `preview_only: true`, the response lists the zero-based weekly indices
 that would change and no command is sent. Omit it or set it to `false` to save.
 An already matching range is a no-op. The action can optionally return a response
-(`preview`, `unchanged`, or `verified`).
+(`preview`, `unchanged`, `verified`, or `verified_with_warning`).
 
 Before a write, the action fetches a fresh full week and saves `before.json`,
 `request.json`, and `proposed-command.json` under
-`<config>/edilkamin-backups/schedule-<UTC>-<ID>/`. Another cloud read checks for
+`<config>/edilkamin-backups/<MAC>/schedule-<UTC>-<ID>/`. HA
+helpers write the JSON files atomically. Keep the last 20 edit folders per
+stove; unrelated folders, other stoves and legacy flat backups are untouched. Another cloud read checks for
 concurrent edits before sending the full 336-slot array. The cloud offers no
 atomic compare-and-set operation, so avoid simultaneous schedule editors.
 Requests are serialized per stove. A full readback verifies the expected data,
@@ -226,6 +229,28 @@ If a command times out or readback differs, the action raises an error and keeps
 the backup. It does not blindly retry or restore a whole week over possible
 subsequent edits: inspect the saved plan in The Mind before trying again. This
 action uses the existing cloud account and adds no periodic polling.
+
+If the write is confirmed but the cloud leaves `power_ranges` unchanged, the
+response is `verified_with_warning` with `warning: representations_differ`.
+HA also logs an explicit warning: later edits are refused until the two
+representations match again. Inspect/correct the saved plan in The Mind before
+trying again. This outcome is not silently reported as ordinary success.
+The daily schedule sensor's `last_schedule_edit` attribute exposes the latest
+result, including the warning or an uncertain write. No account tokens are stored.
+
+The action checks the complete chrono metadata during verification deliberately:
+a concurrent app edit can make an otherwise applied command unconfirmed. It
+does not overwrite or roll back that edit. Avoid using both editors simultaneously.
+
+Allow enough time in blocking automations: two cloud reads can take 20 seconds
+each, then the command up to 20 seconds and readback polling up to 45 seconds
+(about 105 seconds total), followed by a best-effort refresh of up to 20 seconds.
+Waiting for another edit or backup storage adds time; this is not an overall
+hard timeout. Use suitable automation modes/timeouts and `continue_on_error`
+if a failure should not stop later actions. The command is never blindly retried.
+Input validation runs once at the action boundary, including HA-compatible
+templated booleans such as `preview_only: "false"`.
+
 
 Click on this button:
 

@@ -47,6 +47,23 @@ def test_metadata(coordinator):
     assert sensor.device_info["identifiers"] == {("edilkamin", "00:11:22:33:44:55")}
 
 
+def test_last_edit_is_exposed_without_sharing_mutable_data(coordinator):
+    coordinator.schedule_edit_status = {
+        "last_schedule_edit": {
+            "status": "verified_with_warning",
+            "warning": "representations_differ",
+        }
+    }
+    sensor = EdilkaminDailyScheduleSensor(coordinator)
+    attributes = sensor.extra_state_attributes
+    assert attributes["last_schedule_edit"]["warning"] == "representations_differ"
+    attributes["last_schedule_edit"]["status"] = "changed"
+    assert (
+        coordinator.schedule_edit_status["last_schedule_edit"]["status"]
+        == "verified_with_warning"
+    )
+
+
 @pytest.mark.parametrize("day", range(7))
 @pytest.mark.parametrize("is_auto", [True, False])
 def test_weekday_and_mode(coordinator, day, is_auto):

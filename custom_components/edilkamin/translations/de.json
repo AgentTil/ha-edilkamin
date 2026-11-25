@@ -18,5 +18,78 @@
         }
       }
     }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Wochenzeitplan ändern",
+      "description": "Aus-, Economy- oder Komfortzeiten für genau einen Ofen im Automatikmodus ändern. Chrono-Aktivierung und Zieltemperaturen bleiben erhalten. Lesen, Schreiben und Prüfen können etwa 105 Sekunden dauern, zusätzlich bis zu 20 Sekunden für die Aktualisierung sowie Wartezeit auf andere Änderungen oder Sicherungen. Vorschau schreibt nichts. Pro Ofen bleiben die letzten 20 Sicherungen erhalten.",
+      "fields": {
+        "days": {
+          "name": "Wochentage",
+          "description": "Ausgewählte Wochentage im gespeicherten Wochenplan."
+        },
+        "start": {
+          "name": "Beginn",
+          "description": "Lokale volle oder halbe Stunde, Sekunden null. Bereiche über Mitternacht aufteilen."
+        },
+        "end": {
+          "name": "Ende (ausschließlich)",
+          "description": "Lokale volle oder halbe Stunde, Sekunden null. 00:00 bedeutet Ende des ausgewählten Tages. Bisheriges 24:00 wird in YAML weiterhin akzeptiert."
+        },
+        "mode": {
+          "name": "Modus"
+        },
+        "preview_only": {
+          "name": "Nur Vorschau",
+          "description": "Gespeicherten Plan lesen und Änderungen anzeigen, ohne zu schreiben oder Sicherungen anzulegen."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_target": {
+      "message": "Genau einen geladenen Edilkamin-Ofen oder eine seiner Entitäten auswählen."
+    },
+    "manual_mode": {
+      "message": "Zeitplanänderungen werden derzeit nur im Automatikmodus unterstützt."
+    },
+    "representations_differ": {
+      "message": "Die Chrono-Darstellungen unterscheiden sich. Den Plan in The Mind prüfen."
+    },
+    "schedule_changed": {
+      "message": "Der Zeitplan wurde während der Vorbereitung geändert. Kein Befehl gesendet."
+    },
+    "invalid_cloud_schedule": {
+      "message": "Die Cloud lieferte keinen vollständigen gültigen Wochenplan."
+    },
+    "readback_mismatch": {
+      "message": "Der zurückgelesene Plan entspricht nicht vollständig der erwarteten Änderung."
+    },
+    "write_unconfirmed": {
+      "message": "Zeitplanänderung nicht bestätigt; der Befehl wurde nicht wiederholt. The Mind prüfen."
+    },
+    "schedule_failed": {
+      "message": "Zeitplanänderung fehlgeschlagen. Cloud-Verbindung und Sicherungsspeicher prüfen."
+    }
+  },
+  "selector": {
+    "weekdays": {
+      "options": {
+        "monday": "Montag",
+        "tuesday": "Dienstag",
+        "wednesday": "Mittwoch",
+        "thursday": "Donnerstag",
+        "friday": "Freitag",
+        "saturday": "Samstag",
+        "sunday": "Sonntag"
+      }
+    },
+    "chrono_modes": {
+      "options": {
+        "off": "Aus",
+        "economy": "Economy",
+        "comfort": "Komfort"
+      }
+    }
   }
 }

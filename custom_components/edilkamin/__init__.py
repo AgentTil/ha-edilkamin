@@ -12,7 +12,8 @@ from custom_components.edilkamin.api.edilkamin_async_api import EdilkaminAsyncAp
 
 from .const import DOMAIN, MAC_ADDRESS, PASSWORD, USERNAME
 from .coordinator import EdilkaminCoordinator
-from .schedule_services import async_setup_services, async_unload_services
+from .schedule_edit import ScheduleWriter
+from .services import async_setup_services
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -28,6 +29,12 @@ PLATFORMS: list[Platform] = [
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def async_setup(hass: HomeAssistant, _config: dict) -> bool:
+    """Register actions once, including while an entry is unavailable."""
+    await async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -53,11 +60,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         token_provider=coordinator.refresh_token,
     )
     hass.data[DOMAIN]["coordinator"] = coordinator
+    entry.runtime_data = ScheduleWriter(
+        hass, hass.data[DOMAIN][entry.entry_id], coordinator
+    )
     register_device(hass, entry, mac_address)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await async_setup_services(
-        hass, entry, hass.data[DOMAIN][entry.entry_id], coordinator
-    )
     return True
 
 
@@ -65,7 +72,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        await async_unload_services(hass, entry)
+        entry.runtime_data = None
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok

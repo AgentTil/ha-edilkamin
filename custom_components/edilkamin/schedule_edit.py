@@ -4,71 +4,47 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-import json
-from pathlib import Path
-import re
-from uuid import uuid4
+from functools import partial
+import logging
+from typing import TYPE_CHECKING
 
+from aiohttp import ClientError
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.util import dt as dt_util
-import voluptuous as vol
 
-DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-MODES = {"off": 0, "economy": 1, "comfort": 2}
+from .schedule_backup import create_backup, save_result
+from .schedule_errors import fail, operation_error
+from .schedule_schema import DAYS, MODES, half_hour
 
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant, ServiceResponse
 
-def half_hour(value: str, *, end: bool = False) -> int:
-    """Parse local half-hour boundaries; 24:00 is an end boundary only."""
-    if end and value == "24:00":
-        return 48
-    if not isinstance(value, str) or not re.fullmatch(
-        r"(?:[01]\d|2[0-3]):(?:00|30)", value
-    ):
-        message = "Use HH:00 or HH:30; 24:00 is allowed only as an end."
-        raise vol.Invalid(message)
-    hour, minute = map(int, value.split(":"))
-    return hour * 2 + minute // 30
+    from .api.edilkamin_async_api import EdilkaminAsyncApi
+    from .coordinator import EdilkaminCoordinator
+
+_LOGGER = logging.getLogger(__name__)
+EXPECTED_ERRORS = (TimeoutError, ClientError, OSError, HomeAssistantError)
 
 
-def validate_range(data):
-    if half_hour(data["end"], end=True) <= half_hour(data["start"]):
-        message = "End must be after start. Split overnight ranges at midnight."
-        raise vol.Invalid(message)
-    return data
-
-
-EDIT_SCHEMA = vol.All(
-    vol.Schema(
-        {
-            vol.Required("days"): vol.All([vol.In(DAYS)], vol.Length(min=1, max=7)),
-            vol.Required("start"): str,
-            vol.Required("end"): str,
-            vol.Required("mode"): vol.In(MODES),
-            vol.Optional("preview_only", default=False): bool,
-        }
-    ),
-    validate_range,
-)
-
-
-def fail(message):
-    raise HomeAssistantError(message)
-
-
-def snapshot(info):
+def snapshot(info: dict) -> dict:
     """Validate full weekly data, not an empty fallback for missing values."""
     nvm = info.get("nvm") if isinstance(info, dict) else None
     if not isinstance(nvm, dict) or not isinstance(nvm.get("user_parameters"), dict):
-        fail("The cloud did not return a complete weekly schedule.")
+        msg = "invalid_cloud_schedule"
+        raise operation_error(msg)
     auto = nvm["user_parameters"].get("is_auto")
-    if type(auto) not in (bool, int) or auto != 1:
-        fail("Schedule editing is currently supported only in automatic mode.")
+    if type(auto) not in (bool, int) or auto not in (0, 1):
+        msg = "invalid_cloud_schedule"
+        raise operation_error(msg)
+    if not auto:
+        fail("manual_mode")
     chrono = nvm.get("chrono")
     if not isinstance(chrono, dict):
-        fail("The cloud did not return chrono data.")
+        msg = "invalid_cloud_schedule"
+        raise operation_error(msg)
     active = chrono.get("is_active")
     if type(active) not in (bool, int) or active not in (0, 1):
-        fail("The cloud did not return a valid chrono enablement flag.")
+        msg = "invalid_cloud_schedule"
+        raise operation_error(msg)
     for key, maximum in (("temperature_ranges", 2), ("power_ranges", 5)):
         values = chrono.get(key)
         if (
@@ -78,11 +54,12 @@ def snapshot(info):
                 type(value) is not int or not 0 <= value <= maximum for value in values
             )
         ):
-            fail(f"Invalid weekly schedule: {key}.")
+            msg = "invalid_cloud_schedule"
+            raise operation_error(msg)
     return deepcopy(chrono)
 
 
-def edit(chrono, request):
+def edit(chrono: dict, request: dict) -> dict:
     result = deepcopy(chrono)
     start, end = half_hour(request["start"]), half_hour(request["end"], end=True)
     for day in set(request["days"]):
@@ -93,7 +70,7 @@ def edit(chrono, request):
     return result
 
 
-def changed_slots(before, after):
+def changed_slots(before: list[int], after: list[int]) -> list[int]:
     return [
         index
         for index, (old, new) in enumerate(zip(before, after, strict=True))
@@ -101,7 +78,7 @@ def changed_slots(before, after):
     ]
 
 
-def verified(before, desired, actual):
+def verified(before: dict, desired: dict, actual: dict) -> bool:
     """The cloud may mirror a shared schedule under both array names."""
     if actual["temperature_ranges"] != desired["temperature_ranges"]:
         return False
@@ -116,54 +93,24 @@ def verified(before, desired, actual):
     }
 
 
-def create_backup(root, mac, before, request, desired):
-    """Persist the previous plan and proposed request before a device command."""
-    folder = (
-        Path(root)
-        / "edilkamin-backups"
-        / (
-            "schedule-"
-            + dt_util.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            + "-"
-            + uuid4().hex
-        )
-    )
-    folder.mkdir(parents=True, exist_ok=False)
-    for name, data in {
-        "before.json": {"mac_address": mac, "chrono": before},
-        "request.json": request,
-        "proposed-command.json": {
-            "name": "chrono_temperature_ranges",
-            "value": desired["temperature_ranges"],
-        },
-    }.items():
-        with (folder / name).open("x", encoding="utf-8") as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
-    return str(folder)
-
-
-def save_result(folder, result, actual=None):
-    target = Path(folder) / "result.json"
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps({"result": result, "readback": actual}, indent=2), encoding="utf-8"
-    )
-    temporary.replace(target)
-
-
 class ScheduleWriter:
     """Serialize edits per config entry, with fresh cloud reads and backups."""
 
-    def __init__(self, hass, api, coordinator):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: EdilkaminAsyncApi,
+        coordinator: EdilkaminCoordinator,
+    ) -> None:
         self.hass, self.api, self.coordinator = hass, api, coordinator
         self.lock = asyncio.Lock()
         self.last_result = None
 
-    async def _read(self):
+    async def _read(self) -> dict:
         async with asyncio.timeout(20):
             return snapshot(await self.api.get_info())
 
-    async def _send_verified(self, before, desired):
+    async def _send_verified(self, before: dict, desired: dict) -> dict:
         # No automatic write retry: a timeout does not prove a command was rejected.
         async with asyncio.timeout(20):
             await self.api.execute_command(
@@ -179,57 +126,84 @@ class ScheduleWriter:
                 actual = await self._read()
                 if verified(before, desired, actual):
                     return actual
-        message = "The cloud readback does not match the complete expected schedule."
-        raise HomeAssistantError(message)
+        msg = "readback_mismatch"
+        raise operation_error(msg)
 
-    async def set_schedule(self, data):
-        # ServiceCall.data is read-only; validation may add default values.
-        request = EDIT_SCHEMA(dict(data))
+    def _describe_edit(
+        self, request: dict, before: dict, desired: dict
+    ) -> tuple[dict, list[int]]:
+        modified = changed_slots(
+            before["temperature_ranges"], desired["temperature_ranges"]
+        )
+        result = {
+            "status": "preview" if request["preview_only"] else "unchanged",
+            "recurrence": "weekly",
+            "days": list(dict.fromkeys(request["days"])),
+            "start": request["start"],
+            "end": request["end"],
+            "mode": request["mode"],
+            "changed_slots": modified,
+            "chrono_active": bool(before["is_active"]),
+            "write_attempts": 0,
+        }
+        return result, modified
+
+    def _representations_safe(self, chrono: dict) -> bool:
+        """Reject unexplained divergence, including after a confirmed write."""
+        return chrono["temperature_ranges"] == chrono["power_ranges"]
+
+    def _protected_backups(self) -> set[str]:
+        """Subclasses may retain evidence needed by pending recovery."""
+        return set()
+
+    async def _backup(self, before: dict, request: dict, desired: dict) -> str:
+        """Share audited persistence between writes and automatic restoration."""
+        save = partial(
+            create_backup,
+            self.hass.config.path(),
+            self.coordinator.get_mac_address(),
+            before,
+            request,
+            desired,
+            protected=self._protected_backups(),
+        )
+        return await self.hass.async_add_executor_job(save)
+
+    async def _before_write(
+        self,
+        request: dict,
+        result: dict,
+        before: dict,
+        modified: list[int],
+        folder: str,
+    ) -> None:
+        """Extension point to persist recovery before an optional temporary write."""
+
+    async def _after_verified(self, result: dict) -> None:
+        """Extension point to acknowledge a durable temporary window."""
+
+    async def set_schedule(self, request: dict) -> ServiceResponse:
+        """Write an action-layer-validated request, with no blind command retry."""
         async with self.lock:
             try:
                 before = await self._read()
-                if before["temperature_ranges"] != before["power_ranges"]:
-                    fail(
-                        "Editing differing chrono representations has not been "
-                        "validated; no command was sent."
-                    )
+                if not self._representations_safe(before):
+                    fail("representations_differ")
                 desired = edit(before, request)
-                modified = changed_slots(
-                    before["temperature_ranges"], desired["temperature_ranges"]
-                )
-                result = {
-                    "status": "preview" if request["preview_only"] else "unchanged",
-                    "recurrence": "weekly",
-                    "days": list(dict.fromkeys(request["days"])),
-                    "start": request["start"],
-                    "end": request["end"],
-                    "mode": request["mode"],
-                    "changed_slots": modified,
-                    "chrono_active": bool(before["is_active"]),
-                    "write_attempts": 0,
-                }
+                result, modified = self._describe_edit(request, before, desired)
                 if request["preview_only"] or not modified:
                     self.last_result = result
                     return result
-                folder = await self.hass.async_add_executor_job(
-                    create_backup,
-                    self.hass.config.path(),
-                    self.coordinator.get_mac_address(),
-                    before,
-                    request,
-                    desired,
-                )
+                folder = await self._backup(before, request, desired)
                 result["backup"] = folder
                 if await self._read() != before:
                     result["status"] = "conflict"
                     self.last_result = result
                     await self.hass.async_add_executor_job(save_result, folder, result)
-                    fail(
-                        "The schedule changed while preparing this edit. "
-                        "Read it again; no command was sent."
-                    )
+                    fail("schedule_changed")
                 result.update(status="pending", write_attempts=1)
                 await self.hass.async_add_executor_job(save_result, folder, result)
+                await self._before_write(request, result, before, modified, folder)
                 actual = None
                 try:
                     actual = await self._send_verified(before, desired)
@@ -239,29 +213,59 @@ class ScheduleWriter:
                             before["power_ranges"], actual["power_ranges"]
                         ),
                     )
-                except Exception as error:
+                    await self._after_verified(result)
+                except EXPECTED_ERRORS as error:
                     result.update(status="unconfirmed", error=type(error).__name__)
                     self.last_result = result
                     await self.hass.async_add_executor_job(
                         save_result, folder, result, actual
                     )
-                    message = (
-                        "Schedule write not confirmed; it was not retried. "
-                        f"Check The Mind. Backup: {folder}."
+                    _LOGGER.warning(
+                        "Schedule write unconfirmed (%s); backup: %s",
+                        type(error).__name__,
+                        folder,
                     )
-                    raise HomeAssistantError(message) from error
+                    msg = "write_unconfirmed"
+                    raise operation_error(msg) from error
+                if not self._representations_safe(actual):
+                    result.update(
+                        status="verified_with_warning", warning="representations_differ"
+                    )
+                    _LOGGER.warning(
+                        "Schedule written, but cloud representations differ; "
+                        "further edits are refused until they match. "
+                        "Check The Mind. Backup: %s",
+                        folder,
+                    )
                 self.last_result = result
                 await self.hass.async_add_executor_job(
                     save_result, folder, result, actual
                 )
-                await self.coordinator.async_request_refresh()
+                await self._refresh()
             except HomeAssistantError:
                 raise
-            except Exception as error:
-                message = (
-                    "Schedule editing failed; check cloud connectivity "
-                    "and backup storage."
-                )
-                raise HomeAssistantError(message) from error
+            except (TimeoutError, ClientError, OSError) as error:
+                _LOGGER.warning("Schedule editing failed: %s", type(error).__name__)
+                msg = "schedule_failed"
+                raise operation_error(msg) from error
             else:
                 return result
+            finally:
+                self._notify()
+
+    async def _refresh(self) -> None:
+        """A later refresh failure must not turn a verified write into an error."""
+        try:
+            async with asyncio.timeout(20):
+                await self.coordinator.async_request_refresh()
+        except EXPECTED_ERRORS as error:
+            _LOGGER.warning(
+                "Schedule written; coordinator refresh failed: %s", type(error).__name__
+            )
+
+    def _notify(self) -> None:
+        """Expose action results through the existing schedule sensor."""
+        self.coordinator.schedule_edit_status = {
+            "last_schedule_edit": deepcopy(self.last_result)
+        }
+        self.coordinator.async_update_listeners()
